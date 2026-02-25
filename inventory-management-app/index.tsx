@@ -3,72 +3,130 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 
-// --- Local User Data (Replace Firebase Auth) ---
-const appUsers: User[] = [
-  { email: 'admin@gmail.com', password_raw: 'Armada25', role: 'admin' as UserRole, username: 'admin' },
-  { email: 'user@example.com', password_raw: 'password123', role: 'user' as UserRole, username: 'testuser' },
-];
-// Note: Storing plain passwords is not secure for production. This is for demonstration.
-// In a real app, use password hashing.
-// ----------------------------------------------------
+// Firebase SDKs
+import { initializeApp } from 'firebase/app';
+// Analytics was imported but not used, so it's removed.
+// import { getAnalytics } from 'firebase/analytics'; 
+import { 
+  getAuth,
+  onAuthStateChanged,
+  signInWithEmailAndPassword,
+  signOut,
+  setPersistence,
+  browserLocalPersistence,
+} from 'firebase/auth';
+import type { User } from 'firebase/auth';
+import { 
+  getDatabase,
+  ref as dbRef, 
+  set,
+  get,
+  onValue,
+  update,
+  remove,
+  push,
+  child,
+} from 'firebase/database';
 
-const ITEMS_STORAGE_KEY = 'inventoryApp_items';
-const CATEGORIES_STORAGE_KEY = 'inventoryApp_categories';
-const USERS_STORAGE_KEY = 'inventoryApp_users'; // For storing registered users locally
+// Your web app's Firebase configuration
+const firebaseConfig = {
+  apiKey: "AIzaSyAE6DsJeTnj5GeUTi2d77GRaywdaP0c-Kw",
+  authDomain: "inventory-363c8.firebaseapp.com",
+  databaseURL: "https://inventory-363c8-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  projectId: "inventory-363c8",
+  storageBucket: "inventory-363c8.firebasestorage.app", // Kept for consistency, though not used
+  messagingSenderId: "971715277392",
+  appId: "1:971715277392:web:6762c17a930462008b9755"
+};
+
+// Initialize Firebase
+const firebaseApp = initializeApp(firebaseConfig);
+// const analytics = getAnalytics(firebaseApp); // Removed
+const rtdb = getDatabase(firebaseApp); // Initialize Realtime Database
+const auth = getAuth(firebaseApp);
 
 const SIZES = ["XS", "S", "M", "L", "XL", "XXL", "3XL"] as const;
 type Size = typeof SIZES[number];
-type UserRole = 'admin' | 'user' | null;
 
-interface User {
-  email: string;
-  password_raw: string; // Storing raw for simplicity, hash in real app
-  role: UserRole;
-  username: string;
-}
+// UserDocument interface not used; admin auth handled via Firebase Auth
 
 interface CategoryDefinition {
-  id: string; // Unique ID, can be category name for simplicity if unique
+  id: string; 
   name: string;
   subcategories: string[];
 }
 
 interface InventoryItem {
-  id: string; // Unique ID, e.g., SKU or generated
+  id: string; 
   name: string;
   sku: string;
-  category: string;
-  subcategory: string;
+  category: string; 
+  subcategory: string; 
   sizes: Record<Size, number>;
   price: number;
   description?: string;
-  imageUrl?: string; // Base64 encoded image string
+  imageUrl?: string;
 }
 
-// --- INITIAL DATA (for seeding if localStorage is empty) ---
-const INITIAL_CATEGORIES_DATA: Omit<CategoryDefinition, 'id'>[] = [
-  { name: "Men", subcategories: ["Men's Oxford", "Men's Cuban", "Formal Shirt", "Winter Collection", "Casual Wear", "Default"] },
-  { name: "Women", subcategories: ["Formal Wear", "Casual Wear", "Default"] },
-  { name: "Uncategorized", subcategories: ["Default"] }
-];
+const APP_HISTORY_KEY = 'inventory-app';
 
-const defaultSizesSeed = SIZES.reduce((acc, size) => { acc[size] = 0; return acc; }, {} as Record<Size, number>);
-const INITIAL_ITEMS_DATA: Omit<InventoryItem, 'id' | 'imageUrl'>[] = [
-    { name: 'Classic T-Shirt', sku: 'TS-001', category: 'Men', subcategory: 'Casual Wear', sizes: { ...defaultSizesSeed, XS: 5, S: 10, M: 15, L: 20, XL: 15, XXL: 5, '3XL': 2 }, price: 25.00, description: 'Comfortable cotton t-shirt'},
-    { name: 'Denim Jeans', sku: 'JN-002', category: 'Men', subcategory: 'Casual Wear', sizes: { ...defaultSizesSeed, XS: 2, S: 5, M: 10, L: 12, XL: 8, XXL: 3, '3XL': 1 }, price: 60.00, description: 'Slim-fit denim jeans'},
-    { name: 'Hoodie Pro', sku: 'HD-003', category: 'Men', subcategory: 'Winter Collection', sizes: { ...defaultSizesSeed, XS: 3, S: 8, M: 12, L: 15, XL: 10, XXL: 6, '3XL': 3 }, price: 45.00, description: 'Warm fleece hoodie'},
-    { name: 'Elegant Blouse', sku: 'BL-001', category: 'Women', subcategory: 'Formal Wear', sizes: { ...defaultSizesSeed, XS: 4, S: 10, M: 15, L: 10, XL: 5, XXL: 2, '3XL': 1 }, price: 35.00, description: 'Silk formal blouse'},
-    { name: 'Summer Dress', sku: 'DR-002', category: 'Women', subcategory: 'Casual Wear', sizes: { ...defaultSizesSeed, XS: 6, S: 12, M: 18, L: 15, XL: 7, XXL: 4, '3XL': 2 }, price: 50.00, description: 'Light cotton summer dress'},
-];
-// -------------------------------------------------------------
-
-const generateId = () => `id_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+interface AppHistoryState {
+  __app: typeof APP_HISTORY_KEY;
+  viewMode: 'admin' | 'stock';
+  selectedCategoryForView: string | null;
+  selectedSubcategoryForView: string | null;
+  historyIndex: number;
+}
 
 const calculateTotalQuantity = (sizes: Record<Size, number>): number => {
   return SIZES.reduce((sum, size) => sum + (sizes[size] || 0), 0);
+};
+
+type CsvValue = string | number;
+
+const sanitizeFilenamePart = (value: string): string => {
+  return value
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '')
+    .replace(/\s+/g, '_')
+    .trim();
+};
+
+const formatCsvValue = (value: CsvValue): string => {
+  const text = String(value ?? '');
+  if (/[",\r\n]/.test(text)) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+};
+
+const buildCsvContent = (rows: CsvValue[][]): string => {
+  return rows.map((row) => row.map(formatCsvValue).join(',')).join('\r\n');
+};
+
+const buildSubcategoryExportFilename = (categoryName: string, subcategoryName: string): string => {
+  const safeCategory = sanitizeFilenamePart(categoryName);
+  const safeSubcategory = sanitizeFilenamePart(subcategoryName);
+  const baseName = [safeCategory || 'category', safeSubcategory || 'subcategory', 'stock']
+    .filter(Boolean)
+    .join('_');
+  return `${baseName || 'subcategory_stock'}.csv`;
+};
+
+const downloadCsvFile = (filename: string, rows: CsvValue[][]): void => {
+  // Prefix with BOM for Excel UTF-8 support.
+  const csvContent = `\ufeff${buildCsvContent(rows)}`;
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 };
 
 interface ProductStockViewProps {
@@ -80,8 +138,9 @@ interface ProductStockViewProps {
   onSelectSubcategory: (categoryName: string, subcategoryName: string) => void;
   onNavigateBack: () => void;
   onSellItemSize: (itemId: string, size: Size) => void;
-  userRole: UserRole;
   getCategoryItemCount: (categoryName: string, subcategoryName: string) => number;
+  isAdmin: boolean;
+  // currentUser prop removed
 }
 
 const ProductStockView: React.FC<ProductStockViewProps> = ({
@@ -93,15 +152,29 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
   onSelectSubcategory,
   onNavigateBack,
   onSellItemSize,
-  userRole,
   getCategoryItemCount,
+  isAdmin,
 }) => {
+  const handleExportSubcategory = () => {
+    if (!selectedCategoryName || !selectedSubcategoryName) return;
+
+    const headerRow: CsvValue[] = ['Name', 'Image URL', ...SIZES];
+    const dataRows: CsvValue[][] = items.map(item => ([
+      item.name,
+      item.imageUrl || '',
+      ...SIZES.map(size => item.sizes[size] || 0),
+    ]));
+
+    const filename = buildSubcategoryExportFilename(selectedCategoryName, selectedSubcategoryName);
+    downloadCsvFile(filename, [headerRow, ...dataRows]);
+  };
+
   if (!selectedCategoryName) {
     return (
       <div className="category-selection-container">
         <h2>Shop by Category</h2>
         {allCategories.filter(cat => cat.name !== 'Uncategorized' || cat.subcategories.some(subcat => getCategoryItemCount(cat.name, subcat) > 0)).length === 0 && (
-           <p className="empty-state-text">No categories with products available.</p>
+           <p className="empty-state-text">No categories with products available. Add categories and products in the admin panel.</p>
         )}
         <div className="category-grid">
           {allCategories.map(category => {
@@ -114,7 +187,7 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
              }
             return (
               <button
-                key={category.id || category.name}
+                key={category.id}
                 onClick={() => onSelectCategory(category.name)}
                 className="category-card btn"
                 aria-label={`View products in ${category.name}`}
@@ -132,7 +205,9 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
   if (!selectedSubcategoryName) {
     const category = allCategories.find(cat => cat.name === selectedCategoryName);
     if (!category) return <p className="empty-state-text">Category not found.</p>;
+    
     const visibleSubcategories = category.subcategories.filter(subcat => getCategoryItemCount(category.name, subcat) > 0 || subcat === 'Default');
+    
     return (
       <div className="category-selection-container">
         <div className="navigation-header">
@@ -142,15 +217,18 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
           <h2>{selectedCategoryName} &gt; Select Subcategory</h2>
         </div>
          {visibleSubcategories.length === 0 && (
-           <p className="empty-state-text">No subcategories with products available in {category.name}.</p>
+           <p className="empty-state-text">No subcategories with products available in {category.name}. Add products to this subcategory or create new subcategories in the admin panel.</p>
         )}
         <div className="category-grid">
           {category.subcategories.map(subcategory => { 
             const itemCount = getCategoryItemCount(category.name, subcategory);
             if (itemCount === 0 && subcategory !== 'Default') return null;
+
             if (category.name === 'Uncategorized' && subcategory === 'Default' && itemCount === 0 && category.subcategories.length > 1) {
-              // Hide if Uncategorized/Default is empty but other Uncategorized subcats exist
+              const otherUncategorizedSubcatsHaveItems = category.subcategories.filter(s => s !== 'Default').some(s => getCategoryItemCount(category.name, s) > 0);
+              if (otherUncategorizedSubcatsHaveItems) return null;
             }
+
             return (
               <button
                 key={subcategory}
@@ -176,6 +254,18 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
         </button>
         <h2>{selectedCategoryName} &gt; {selectedSubcategoryName}</h2>
       </div>
+      {isAdmin && (
+        <div className="subcategory-export-bar">
+          <button
+            onClick={handleExportSubcategory}
+            className="btn btn-success"
+            aria-label={`Export ${selectedCategoryName} ${selectedSubcategoryName} stock to CSV`}
+            disabled={items.length === 0}
+          >
+            Export Excel (CSV)
+          </button>
+        </div>
+      )}
       {items.length === 0 && (
         <div className="product-stock-view-container empty-state full-span-empty">
           <h2>No products found in this subcategory.</h2>
@@ -184,15 +274,25 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
       )}
       {items.map(item => (
         <div key={item.id} className="product-stock-card">
-          {item.imageUrl && ( // imageUrl is now Base64
-            <div className="product-image-container">
-              <img src={item.imageUrl} alt={item.name} className="product-image" />
+          <div className="product-stock-card-header">
+            <div className="product-stock-card-details">
+              <h3>{item.name}</h3>
+              <p className="sku">SKU: {item.sku}</p>
+              <p className="price">Price: ৳{item.price.toFixed(2)}</p>
+              <p className="current-stock">Available Stock: {calculateTotalQuantity(item.sizes)}</p>
+              {item.description && <p className="description">{item.description}</p>}
             </div>
-          )}
-          <h3>{item.name}</h3>
-          <p className="sku">SKU: {item.sku}</p>
-           <p className="price">Price: ${item.price.toFixed(2)}</p>
-          {item.description && <p className="description">{item.description}</p>}
+            {item.imageUrl && (
+              <div className="product-image-container">
+                <img
+                  src={item.imageUrl}
+                  alt={`${item.name} product`}
+                  className="product-image"
+                  loading="lazy"
+                />
+              </div>
+            )}
+          </div>
           <div className="sizes-overview">
             <h4>Available Stock by Size:</h4>
             <ul>
@@ -200,9 +300,9 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
                 <li key={size}>
                   <span className="size-label">{size}:</span>
                   <span className="size-quantity">{item.sizes[size] || 0}</span>
-                  {userRole === 'admin' && (
+                  {isAdmin && (
                     <button
-                      onClick={() => onSellItemSize(item.id!, size)}
+                      onClick={() => onSellItemSize(item.id, size)}
                       disabled={(item.sizes[size] || 0) === 0}
                       className="btn btn-sell-size"
                       aria-label={`Sell one ${size} of ${item.name}`}
@@ -220,149 +320,7 @@ const ProductStockView: React.FC<ProductStockViewProps> = ({
   );
 };
 
-interface LoginViewProps {
-  onLogin: (email: string, password_raw: string) => Promise<void>;
-  loginError: string | null;
-  onSwitchToRegister: () => void;
-  isLoggingIn: boolean;
-}
-
-const LoginView: React.FC<LoginViewProps> = ({ onLogin, loginError, onSwitchToRegister, isLoggingIn }) => {
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await onLogin(email, password);
-  };
-
-  return (
-    <div className="login-container">
-      <form onSubmit={handleSubmit} className="login-form">
-        <h2>Login</h2>
-        {loginError && <p className="login-error-message">{loginError}</p>}
-        <div className="form-group">
-          <label htmlFor="email">Email</label>
-          <input
-            type="email"
-            id="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            aria-required="true"
-          />
-        </div>
-        <div className="form-group">
-          <label htmlFor="password">Password</label>
-          <input
-            type="password"
-            id="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            aria-required="true"
-          />
-        </div>
-        <button type="submit" className="btn btn-primary btn-login" disabled={isLoggingIn}>
-          {isLoggingIn ? 'Logging in...' : 'Login'}
-        </button>
-        <p className="auth-switch-message">
-          Don't have an account?{' '}
-          <button type="button" onClick={onSwitchToRegister} className="btn-link" disabled={isLoggingIn}>
-            Register here
-          </button>
-        </p>
-      </form>
-    </div>
-  );
-};
-
-interface RegistrationViewProps {
-  onRegister: (email: string, username: string, password_raw: string, confirmPassword_raw: string) => Promise<void>;
-  registrationMessage: { type: 'success' | 'error'; text: string } | null;
-  onSwitchToLogin: () => void;
-  isRegistering: boolean;
-}
-
-const RegistrationView: React.FC<RegistrationViewProps> = ({ onRegister, registrationMessage, onSwitchToLogin, isRegistering }) => {
-  const [email, setEmail] = useState('');
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-
-  const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    await onRegister(email, username, password, confirmPassword);
-  };
-
-  return (
-    <div className="login-container">
-      <form onSubmit={handleSubmit} className="login-form">
-        <h2>Register</h2>
-        {registrationMessage && (
-          <p className={registrationMessage.type === 'success' ? 'registration-success-message' : 'login-error-message'}>
-            {registrationMessage.text}
-          </p>
-        )}
-        <div className="form-group">
-          <label htmlFor="reg-email">Email</label>
-          <input
-            type="email"
-            id="reg-email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            aria-required="true"
-          />
-        </div>
-         <div className="form-group">
-          <label htmlFor="reg-username">Username</label>
-          <input
-            type="text"
-            id="reg-username"
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            aria-required="true"
-          />
-        </div>
-        <div className="form-group">
-          <label htmlFor="reg-password">Password</label>
-          <input
-            type="password"
-            id="reg-password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-            aria-required="true"
-            minLength={6}
-          />
-        </div>
-        <div className="form-group">
-          <label htmlFor="reg-confirm-password">Confirm Password</label>
-          <input
-            type="password"
-            id="reg-confirm-password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
-            aria-required="true"
-            minLength={6}
-          />
-        </div>
-        <button type="submit" className="btn btn-primary btn-login" disabled={isRegistering}>
-          {isRegistering ? 'Registering...' : 'Register'}
-        </button>
-         <p className="auth-switch-message">
-          Already have an account?{' '}
-          <button type="button" onClick={onSwitchToLogin} className="btn-link" disabled={isRegistering}>
-            Login here
-          </button>
-        </p>
-      </form>
-    </div>
-  );
-};
+// Login view is rendered inline inside App
 
 interface AdminCategoryManagerProps {
   categories: CategoryDefinition[];
@@ -386,14 +344,21 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
   const [selectedCategoryForNewSub, setSelectedCategoryForNewSub] = useState<string>(categories[0]?.id || '');
 
   useEffect(() => {
-    if (categories.length > 0 && !categories.find(c => c.id === selectedCategoryForNewSub)) {
-      setSelectedCategoryForNewSub(categories[0].id!);
-    } else if (categories.length === 0) {
-      setSelectedCategoryForNewSub('');
+    if (categories.length > 0) {
+        if (!selectedCategoryForNewSub || !categories.find(c => c.id === selectedCategoryForNewSub)) {
+            const firstValidCategory = categories.find(c => c.name !== 'Uncategorized') || categories[0];
+            if (firstValidCategory) {
+                setSelectedCategoryForNewSub(firstValidCategory.id);
+            } else {
+                setSelectedCategoryForNewSub('');
+            }
+        }
+    } else {
+        setSelectedCategoryForNewSub('');
     }
   }, [categories, selectedCategoryForNewSub]);
 
-  const handleAddCategory = async () => {
+  const handleAddCategoryInternal = async () => {
     if (newCategoryName.trim() && !categories.find(cat => cat.name.toLowerCase() === newCategoryName.trim().toLowerCase())) {
       await onAddCategory(newCategoryName.trim());
       setNewCategoryName('');
@@ -402,13 +367,13 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
     }
   };
 
-  const handleAddSubcategory = async () => {
+  const handleAddSubcategoryInternal = async () => {
     const category = categories.find(cat => cat.id === selectedCategoryForNewSub);
-    if (category && newSubcategoryName.trim() && !category.subcategories.find(sub => sub.toLowerCase() === newSubcategoryName.trim().toLowerCase())) {
-      await onAddSubcategory(category.id!, category.name, newSubcategoryName.trim());
+    if (category && category.name !== 'Uncategorized' && newSubcategoryName.trim() && !category.subcategories.find(sub => sub.toLowerCase() === newSubcategoryName.trim().toLowerCase())) {
+      await onAddSubcategory(category.id, category.name, newSubcategoryName.trim());
       setNewSubcategoryName('');
     } else {
-       alert("Subcategory name cannot be empty, already exists in this category, or no category is selected.");
+       alert("Subcategory name cannot be empty, already exists, or no valid category is selected. 'Uncategorized' cannot have subcategories added this way.");
     }
   };
   
@@ -434,7 +399,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
               placeholder="Category Name"
               aria-label="New category name"
             />
-            <button onClick={handleAddCategory} className="btn btn-success btn-sm">Add Category</button>
+            <button onClick={handleAddCategoryInternal} className="btn btn-success btn-sm">Add Category</button>
           </div>
         </div>
 
@@ -447,6 +412,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
                   value={selectedCategoryForNewSub}
                   onChange={(e) => setSelectedCategoryForNewSub(e.target.value)}
                   aria-label="Select category to add subcategory to"
+                  disabled={categories.filter(c => c.name !== 'Uncategorized').length === 0}
                 >
                   {categories.filter(c => c.name !== 'Uncategorized').map(cat => <option key={cat.id} value={cat.id}>{cat.name}</option>)}
                 </select>
@@ -459,7 +425,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
                   placeholder="Subcategory Name"
                   aria-label="New subcategory name"
                 />
-                <button onClick={handleAddSubcategory} className="btn btn-success btn-sm" disabled={!selectedCategoryForNewSub}>Add Subcategory</button>
+                <button onClick={handleAddSubcategoryInternal} className="btn btn-success btn-sm" disabled={!selectedCategoryForNewSub}>Add Subcategory</button>
               </div>
             </>
           ) : <p>Create a non-'Uncategorized' category first to add subcategories.</p>}
@@ -467,7 +433,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
       </div>
 
       <h4>Existing Categories</h4>
-      {categories.length === 0 && <p>No categories defined yet.</p>}
+      {categories.length === 0 && <p className="empty-state-text">No categories defined yet. Add a category to get started.</p>}
       <ul className="category-list">
         {categories.map(category => (
           <li key={category.id} className="category-list-item">
@@ -485,7 +451,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
                     confirmMessage += `\n\nProducts currently in this category will be moved to "Uncategorized / Default".`;
                   }
                   if (window.confirm(confirmMessage)) {
-                    await onDeleteCategory(category.id!, category.name);
+                    await onDeleteCategory(category.id, category.name);
                   }
                 }}
                 className="btn btn-danger btn-xs"
@@ -516,7 +482,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
                            confirmMessage += `\n\nProducts currently in this subcategory will be moved to the "Default" subcategory of "${category.name}".`;
                         }
                         if (window.confirm(confirmMessage)) {
-                          await onDeleteSubcategory(category.id!, category.name, subcategory);
+                          await onDeleteSubcategory(category.id, category.name, subcategory);
                         }
                       }}
                       className="btn btn-danger btn-xs"
@@ -531,7 +497,7 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
             ) : <p className="no-subcategories-text">No subcategories defined for {category.name}. Add one above.</p>}
              {category.name !== 'Uncategorized' && !category.subcategories.includes('Default') && (
                 <p className="no-subcategories-text" style={{marginTop: '0.5em', fontSize: '0.8em'}}>
-                    Note: A "Default" subcategory will be automatically created if needed for product reassignment.
+                    Note: A "Default" subcategory will be automatically created if needed for product reassignment or if all other subcategories are deleted.
                 </p>
             )}
           </li>
@@ -541,184 +507,180 @@ const AdminCategoryManager: React.FC<AdminCategoryManagerProps> = ({
   );
 };
 
-
 const App: React.FC = () => {
   const [items, setItems] = useState<InventoryItem[]>([]);
   const [categories, setCategories] = useState<CategoryDefinition[]>([]);
-  const [registeredUsers, setRegisteredUsers] = useState<User[]>(appUsers); // Initialize with default users
   
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<InventoryItem | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
-  
-  const [currentUserEmail, setCurrentUserEmail] = useState<string | null>(null);
-  const [currentUserRole, setCurrentUserRole] = useState<UserRole>(null);
-  const [currentUsername, setCurrentUsername] = useState<string | null>(null);
-
-  const [authLoading, setAuthLoading] = useState(true);
+    
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
   const [loginError, setLoginError] = useState<string | null>(null);
-  const [registrationMessage, setRegistrationMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const [authViewMode, setAuthViewMode] = useState<'login' | 'register'>('login');
-  const [isProcessingAuth, setIsProcessingAuth] = useState(false);
-  
-  const [viewMode, setViewMode] = useState<'admin' | 'stock'>('stock');
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+
+  const [viewMode, setViewMode] = useState<'admin' | 'stock'>('stock'); 
   const [selectedCategoryForView, setSelectedCategoryForView] = useState<string | null>(null);
   const [selectedSubcategoryForView, setSelectedSubcategoryForView] = useState<string | null>(null);
 
-  // Load data from localStorage on initial mount
+  const [initialItemsLoaded, setInitialItemsLoaded] = useState(false);
+  const [initialCategoriesLoaded, setInitialCategoriesLoaded] = useState(false);
+
+  const isHandlingPopStateRef = useRef(false);
+  const isInitialHistoryRef = useRef(true);
+  const historyIndexRef = useRef(0);
+  const hasSeededHistoryRef = useRef(false);
+
+  console.warn("IMPORTANT: This app uses Firebase Realtime Database without authentication. Ensure your RTDB security rules are set to allow public read/write for '/categories' and '/products'. This is for development/testing only and is insecure for production.");
+
   useEffect(() => {
-    setAuthLoading(true);
-    // Load users
-    const storedUsers = localStorage.getItem(USERS_STORAGE_KEY);
-    if (storedUsers) {
-      setRegisteredUsers(JSON.parse(storedUsers));
-    } else {
-      localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(appUsers)); // Seed initial users if none stored
-    }
+    setPersistence(auth, browserLocalPersistence).catch((error) => {
+      console.error("Failed to set auth persistence. Falling back to default behavior.", error);
+    });
 
-    // Load items
-    const storedItems = localStorage.getItem(ITEMS_STORAGE_KEY);
-    if (storedItems) {
-      setItems(JSON.parse(storedItems));
-    } else {
-      const initialItemsWithIds = INITIAL_ITEMS_DATA.map(item => ({...item, id: generateId() }));
-      setItems(initialItemsWithIds);
-      localStorage.setItem(ITEMS_STORAGE_KEY, JSON.stringify(initialItemsWithIds));
-    }
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      setCurrentUser(user);
+      setIsAuthReady(true);
+    });
 
-    // Load categories
-    const storedCategories = localStorage.getItem(CATEGORIES_STORAGE_KEY);
-    if (storedCategories) {
-      setCategories(JSON.parse(storedCategories));
-    } else {
-      const initialCategoriesWithIds = INITIAL_CATEGORIES_DATA.map(cat => ({...cat, id: cat.name })); // Use name as ID for simplicity
-      setCategories(initialCategoriesWithIds);
-      localStorage.setItem(CATEGORIES_STORAGE_KEY, JSON.stringify(initialCategoriesWithIds));
-    }
-    
-    // Check session storage for logged-in user
-    const sessionUserEmail = sessionStorage.getItem('currentUserEmail');
-    const sessionUserRole = sessionStorage.getItem('currentUserRole') as UserRole;
-    const sessionUsername = sessionStorage.getItem('currentUsername');
-
-    if (sessionUserEmail && sessionUserRole) {
-      setCurrentUserEmail(sessionUserEmail);
-      setCurrentUserRole(sessionUserRole);
-      setCurrentUsername(sessionUsername);
-      setViewMode(sessionUserRole === 'admin' ? 'admin' : 'stock');
-    }
-    setAuthLoading(false);
+    return () => unsubscribe();
   }, []);
 
-  // Persist items and categories to localStorage whenever they change
-  useEffect(() => {
-    localStorage.setItem(ITEMS_STORAGE_KEY, JSON.stringify(items));
-  }, [items]);
+  const buildHistoryState = (index: number): AppHistoryState => ({
+    __app: APP_HISTORY_KEY,
+    viewMode,
+    selectedCategoryForView,
+    selectedSubcategoryForView,
+    historyIndex: index,
+  });
 
   useEffect(() => {
-    localStorage.setItem(CATEGORIES_STORAGE_KEY, JSON.stringify(categories));
-  }, [categories]);
+    const handlePopState = (event: PopStateEvent) => {
+      const state = event.state as AppHistoryState | null;
+      if (!state || state.__app !== APP_HISTORY_KEY) {
+        return;
+      }
+
+      historyIndexRef.current = typeof state.historyIndex === 'number' ? state.historyIndex : 0;
+      isHandlingPopStateRef.current = true;
+
+      setViewMode(state.viewMode);
+      if (state.viewMode === 'stock') {
+        setSelectedCategoryForView(state.selectedCategoryForView);
+        setSelectedSubcategoryForView(state.selectedSubcategoryForView);
+      } else {
+        setSelectedCategoryForView(null);
+        setSelectedSubcategoryForView(null);
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   useEffect(() => {
-    localStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(registeredUsers));
-  }, [registeredUsers]);
-  
-  // Update view mode based on role
-   useEffect(() => {
-     if (currentUserRole === 'user' && currentUserEmail) {
-        setViewMode('stock');
-     } else if (currentUserRole === 'admin' && currentUserEmail && viewMode !== 'admin' && viewMode !== 'stock') { 
-        setViewMode('admin');
-     }
-  }, [currentUserRole, viewMode, currentUserEmail]);
+    const currentState = window.history.state as AppHistoryState | null;
 
+    if (isInitialHistoryRef.current) {
+      const hasAppState = !!(currentState && currentState.__app === APP_HISTORY_KEY && typeof currentState.historyIndex === 'number');
+      if (hasAppState) {
+        historyIndexRef.current = currentState!.historyIndex;
+      } else {
+        historyIndexRef.current = 0;
+      }
+      window.history.replaceState(buildHistoryState(historyIndexRef.current), '');
 
-  const handleLogin = async (email: string, password_raw: string) => {
-    setIsProcessingAuth(true);
-    setLoginError(null);
-    
-    const user = registeredUsers.find(u => u.email === email && u.password_raw === password_raw);
+      if (!hasSeededHistoryRef.current && (!hasAppState || historyIndexRef.current === 0)) {
+        historyIndexRef.current += 1;
+        window.history.pushState(buildHistoryState(historyIndexRef.current), '');
+        hasSeededHistoryRef.current = true;
+      } else if (!hasSeededHistoryRef.current) {
+        hasSeededHistoryRef.current = true;
+      }
 
-    if (user) {
-      setCurrentUserEmail(user.email);
-      setCurrentUserRole(user.role);
-      setCurrentUsername(user.username);
-      sessionStorage.setItem('currentUserEmail', user.email);
-      sessionStorage.setItem('currentUserRole', user.role || '');
-      sessionStorage.setItem('currentUsername', user.username);
-      setViewMode(user.role === 'admin' ? 'admin' : 'stock');
-      setRegistrationMessage(null);
-      setSelectedCategoryForView(null);
-      setSelectedSubcategoryForView(null);
-    } else {
-      setLoginError("Invalid email or password.");
-    }
-    setIsProcessingAuth(false);
-  };
-
-  const handleRegister = async (email: string, username: string, password_raw: string, confirmPassword_raw: string) => {
-    setIsProcessingAuth(true);
-    setRegistrationMessage(null);
-
-    if (password_raw !== confirmPassword_raw) {
-      setRegistrationMessage({ type: 'error', text: "Passwords do not match." });
-      setIsProcessingAuth(false);
-      return;
-    }
-    if (password_raw.length < 6) {
-      setRegistrationMessage({ type: 'error', text: "Password should be at least 6 characters." });
-      setIsProcessingAuth(false);
-      return;
-    }
-    if (registeredUsers.find(u => u.email === email)) {
-      setRegistrationMessage({ type: 'error', text: "Email already registered." });
-      setIsProcessingAuth(false);
-      return;
-    }
-    if (registeredUsers.find(u => u.username === username)) {
-      setRegistrationMessage({ type: 'error', text: "Username already taken." });
-      setIsProcessingAuth(false);
+      isInitialHistoryRef.current = false;
       return;
     }
 
-    let role: UserRole = 'user';
-    const designatedAdminEmail = "admin@gmail.com";
+    if (isHandlingPopStateRef.current) {
+      isHandlingPopStateRef.current = false;
+      window.history.replaceState(buildHistoryState(historyIndexRef.current), '');
+      return;
+    }
 
-    if (email === designatedAdminEmail) {
-        role = 'admin';
-    } else {
-        // First non-designated admin becomes admin if no other admin exists
-        const adminExists = registeredUsers.some(u => u.role === 'admin');
-        if (!adminExists) {
-            role = 'admin';
+    historyIndexRef.current += 1;
+    window.history.pushState(buildHistoryState(historyIndexRef.current), '');
+  }, [viewMode, selectedCategoryForView, selectedSubcategoryForView]);
+
+  // Fetch Categories from RTDB
+  useEffect(() => {
+    setInitialCategoriesLoaded(false);
+    const categoriesNodeRef = dbRef(rtdb, 'categories');
+    const unsubscribeCategories = onValue(categoriesNodeRef, (snapshot) => {
+      const data = snapshot.val();
+      const fetchedCategories: CategoryDefinition[] = [];
+      if (data) {
+        for (const key in data) {
+          fetchedCategories.push({ id: key, ...data[key] });
         }
+      }
+      setCategories(fetchedCategories);
+      setInitialCategoriesLoaded(true);
+      console.log("Categories loaded/updated from RTDB. Count:", fetchedCategories.length);
+      if (fetchedCategories.length === 0) {
+        console.log("No categories found in RTDB. Admin can add them via the Admin Panel.");
+      }
+    }, (error: any) => {
+      console.error("Error fetching categories from RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+      alert("Could not load categories from RTDB. Functionality may be limited. Check console for details and verify RTDB rules and connectivity. Ensure rules allow public read.");
+      setInitialCategoriesLoaded(true); 
+    });
+
+    return () => unsubscribeCategories();
+  }, []); // rtdb is stable
+
+  // Fetch Items (Products) from RTDB, dependent on categories being loaded
+  useEffect(() => {
+    if (!initialCategoriesLoaded) {
+      setItems([]);
+      setInitialItemsLoaded(false); // Explicitly set to false if categories aren't loaded yet
+      return;
     }
     
-    const newUser: User = { email, username, password_raw, role };
-    setRegisteredUsers(prevUsers => [...prevUsers, newUser]);
-    
-    setRegistrationMessage({ type: 'success', text: "Registration successful! Please login." });
-    setAuthViewMode('login');
-    setIsProcessingAuth(false);
-  };
+    setInitialItemsLoaded(false);
+    const itemsNodeRef = dbRef(rtdb, 'products');
+    const unsubscribeItems = onValue(itemsNodeRef, (snapshot) => {
+      const data = snapshot.val();
+      const fetchedItems: InventoryItem[] = [];
+      if (data) {
+        for (const key in data) {
+          const itemData = data[key];
+          fetchedItems.push({ 
+            id: key, 
+            ...itemData,
+            sizes: itemData.sizes || SIZES.reduce((acc, s) => { acc[s] = 0; return acc; }, {} as Record<Size, number>)
+          });
+        }
+      }
+      setItems(fetchedItems);
+      setInitialItemsLoaded(true);
+      console.log("Inventory items loaded/updated from RTDB. Count:", fetchedItems.length);
+      if (fetchedItems.length === 0) {
+        console.log("No items found in RTDB. Admin can add them via the Admin Panel.");
+      }
+    }, (error: any) => {
+      console.error("Error fetching items from RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+      alert("Could not load inventory items from RTDB. Functionality may be limited. Check console for details and verify RTDB rules and connectivity. Ensure rules allow public read.");
+      setInitialItemsLoaded(true); 
+    });
 
-  const handleLogout = async () => {
-    setCurrentUserEmail(null);
-    setCurrentUserRole(null);
-    setCurrentUsername(null);
-    sessionStorage.removeItem('currentUserEmail');
-    sessionStorage.removeItem('currentUserRole');
-    sessionStorage.removeItem('currentUsername');
-    setViewMode('stock'); 
-    setLoginError(null);
-    setRegistrationMessage(null);
-    setAuthViewMode('login');
-    setSelectedCategoryForView(null);
-    setSelectedSubcategoryForView(null);
-  };
+    return () => unsubscribeItems();
+  }, [initialCategoriesLoaded]); // rtdb is stable
 
   const openModal = (item: InventoryItem | null = null) => {
-    if (currentUserRole !== 'admin') return;
     setEditingItem(item);
     setIsModalOpen(true);
   };
@@ -729,66 +691,142 @@ const App: React.FC = () => {
   }, []);
 
   const handleSaveItem = useCallback(async (itemToSave: InventoryItem) => {
-    if (currentUserRole !== 'admin' || !itemToSave) return;
+    if (!itemToSave) {
+       const dataError = "Item data is missing for save operation.";
+       console.error("handleSaveItem error: ", dataError);
+       alert(`Save failed: ${dataError}`);
+       throw new Error(dataError);
+    }
 
     let validatedCategory = itemToSave.category;
     let validatedSubcategory = itemToSave.subcategory;
+    const updates: { [key: string]: any } = {}; 
 
-    const categoryExists = categories.some(c => c.name === validatedCategory);
-    if (!categoryExists) {
+    let categoryDef = categories.find(c => c.name === itemToSave.category);
+    let uncategorizedCatDef = categories.find(c => c.name === 'Uncategorized');
+
+    if (!categoryDef) {
         validatedCategory = 'Uncategorized';
         validatedSubcategory = 'Default';
+        if (!uncategorizedCatDef) {
+            try {
+                const newUncatRef = push(dbRef(rtdb, 'categories'));
+                if (newUncatRef.key) {
+                     updates[`/categories/${newUncatRef.key}`] = { name: 'Uncategorized', subcategories: ['Default'] };
+                     console.log("Scheduled creation of 'Uncategorized' category in RTDB.");
+                } else {
+                    throw new Error("Failed to generate key for new Uncategorized category.");
+                }
+            } catch (e: any) { 
+                console.error("Failed to prepare 'Uncategorized' category creation in RTDB during item save. Error:", e);
+                alert("Error: Could not prepare 'Uncategorized' category. Item save might fail or be incomplete. Check RTDB rules for public write access to /categories.");
+                throw e; 
+            }
+        } else if (!uncategorizedCatDef.subcategories.includes('Default')) {
+            updates[`/categories/${uncategorizedCatDef.id}/subcategories`] = [...new Set([...uncategorizedCatDef.subcategories, 'Default'])].sort();
+            console.log("Scheduled update for 'Uncategorized' to include 'Default' subcategory.");
+        }
     } else {
-        const subcategoryExists = categories.find(c => c.name === validatedCategory)?.subcategories.includes(validatedSubcategory);
+        const subcategoryExists = categoryDef.subcategories.includes(itemToSave.subcategory);
         if (!subcategoryExists) {
             validatedSubcategory = 'Default';
-            const parentCatDef = categories.find(c => c.name === validatedCategory);
-            if (parentCatDef && !parentCatDef.subcategories.includes('Default')) {
-                setCategories(prevCats => prevCats.map(cat => 
-                    cat.id === parentCatDef.id 
-                    ? { ...cat, subcategories: [...new Set([...cat.subcategories, 'Default'])].sort() } 
-                    : cat
-                ));
+            if (!categoryDef.subcategories.includes('Default')) {
+                updates[`/categories/${categoryDef.id}/subcategories`] = [...new Set([...categoryDef.subcategories, 'Default'])].sort();
+                console.log(`Scheduled update for '${categoryDef.name}' to include 'Default' subcategory.`);
             }
         }
     }
     
-    const finalItemData: InventoryItem = { // Ensure ID is handled
-        ...itemToSave,
-        id: itemToSave.id || generateId(), // Generate ID if new, use existing if editing
+    const finalItemData: Omit<InventoryItem, 'id'> = {
+        name: itemToSave.name,
+        sku: itemToSave.sku,
         category: validatedCategory,
         subcategory: validatedSubcategory,
+        sizes: itemToSave.sizes,
+        price: itemToSave.price,
+        description: itemToSave.description,
+        imageUrl: itemToSave.imageUrl?.trim() || '',
     };
     
-    if (editingItem && editingItem.id) { // Editing existing item
-      setItems(prevItems => prevItems.map(i => i.id === editingItem.id ? finalItemData : i));
-    } else { // Adding new item
-      setItems(prevItems => [...prevItems, finalItemData]);
+    try {
+      if (itemToSave.id) { 
+        updates[`/products/${itemToSave.id}`] = finalItemData;
+        console.log("Item update scheduled for RTDB:", itemToSave.id);
+      } else { 
+        const newItemRef = push(dbRef(rtdb, 'products'));
+        if (newItemRef.key) {
+            updates[`/products/${newItemRef.key}`] = finalItemData;
+            console.log("New item add scheduled for RTDB with key:", newItemRef.key);
+        } else {
+            throw new Error("Failed to generate key for new product.");
+        }
+      }
+
+      if(Object.keys(updates).length > 0) {
+          await update(dbRef(rtdb), updates);
+          console.log("Batch update to RTDB successful.");
+      }
+      closeModal();
+
+    } catch (error: any) {
+      console.error("Error saving item to RTDB. Code:", error?.code, "Message:", error?.message, "Full error object:", error);
+      let message = "Failed to save item. Please try again.";
+      if (error.message?.includes('NETWORK_REQUEST_FAILED') || error.message?.includes('Failed to fetch')) {
+        message = "Failed to save item: Network connection issue. Check connection, RTDB status, and rules (ensure public write access).";
+      } else if (error.message?.includes('PERMISSION_DENIED')) {
+        message = "Failed to save item: Permission denied. Check RTDB security rules (ensure public write access).";
+      } else if (error.message) {
+        message = `Failed to save item: ${error.message}`;
+      }
+      alert(message);
+      throw error; 
     }
-    closeModal();
-  }, [editingItem, closeModal, currentUserRole, categories]);
+  }, [closeModal, categories, rtdb]);
 
   const handleDeleteItem = async (itemId: string) => {
-    if (currentUserRole !== 'admin' || !itemId) return; 
+    if (!itemId) return;
     if (window.confirm('Are you sure you want to delete this item?')) {
-      setItems(prevItems => prevItems.filter(i => i.id !== itemId));
+      try {
+        const itemNodeRef = dbRef(rtdb, `products/${itemId}`);
+        await remove(itemNodeRef);
+        alert("Item deleted successfully from RTDB.");
+      } catch (error: any) {
+        console.error("Error deleting item from RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+        let message = "Failed to delete item. Please try again.";
+        if (error.message?.includes('NETWORK_REQUEST_FAILED') || error.message?.includes('Failed to fetch')) {
+            message = "Failed to delete item: Network connection issue. Check connection and RTDB rules (ensure public write access).";
+        } else if (error.message?.includes('PERMISSION_DENIED')) {
+            message = "Failed to delete item: Permission denied. Check RTDB security rules (ensure public write access).";
+        }
+        alert(message);
+      }
     }
   };
 
   const handleSellItemSize = useCallback(async (itemId: string, sizeToSell: Size) => {
-    if (viewMode !== 'stock' && currentUserRole !== 'admin') return; 
     if (!itemId) return;
 
-    setItems(prevItems => prevItems.map(item => {
-      if (item.id === itemId) {
+    const item = items.find(i => i.id === itemId);
+    if (item) {
         const currentQuantity = item.sizes[sizeToSell] || 0;
         if (currentQuantity > 0) {
-          return { ...item, sizes: { ...item.sizes, [sizeToSell]: currentQuantity - 1 } };
+            const newQuantity = currentQuantity - 1;
+            const itemSizeRef = dbRef(rtdb, `products/${itemId}/sizes/${sizeToSell}`);
+            try {
+                await set(itemSizeRef, newQuantity);
+            } catch (error: any) {
+                console.error("Error selling item size in RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+                let message = "Failed to update stock. Please try again.";
+                 if (error.message?.includes('NETWORK_REQUEST_FAILED') || error.message?.includes('Failed to fetch')) {
+                    message = "Failed to update stock: Network connection issue. Check connection and RTDB rules (ensure public write access).";
+                } else if (error.message?.includes('PERMISSION_DENIED')) {
+                    message = "Failed to update stock: Permission denied. Check RTDB rules (ensure public write access).";
+                }
+                alert(message);
+            }
         }
-      }
-      return item;
-    }));
-  }, [currentUserRole, viewMode]); 
+    }
+  }, [items, rtdb]);
 
   const filteredItemsForAdminTable = items.filter(item =>
     item.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -799,11 +837,49 @@ const App: React.FC = () => {
     item.category === selectedCategoryForView && item.subcategory === selectedSubcategoryForView
   );
 
+  const handleAdminLogin = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!loginEmail.trim() || !loginPassword) return;
+    setLoginError(null);
+    setIsLoggingIn(true);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+      setLoginPassword('');
+    } catch (error: any) {
+      let message = 'Login failed. Please check your email and password.';
+      const code = error?.code || '';
+      if (code === 'auth/invalid-email') message = 'Invalid email address.';
+      if (code === 'auth/invalid-credential') message = 'Invalid email or password.';
+      if (code === 'auth/user-not-found') message = 'No user found for this email.';
+      if (code === 'auth/wrong-password') message = 'Incorrect password.';
+      if (code === 'auth/too-many-requests') message = 'Too many attempts. Please try again later.';
+      setLoginError(message);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    try {
+      await signOut(auth);
+      setViewMode('stock');
+      setSelectedCategoryForView(null);
+      setSelectedSubcategoryForView(null);
+      setIsModalOpen(false);
+      setEditingItem(null);
+      setLoginError(null);
+      setLoginEmail('');
+      setLoginPassword('');
+    } catch (error: any) {
+      console.error("Error during logout:", error);
+      alert("Logout failed. Please try again.");
+    }
+  };
+
   const toggleViewMode = () => {
-    if (currentUserRole !== 'admin') return;
     setViewMode(prevMode => {
         const newMode = prevMode === 'admin' ? 'stock' : 'admin';
-        if (newMode === 'stock') { 
+        if (newMode === 'stock') {
             setSelectedCategoryForView(null);
             setSelectedSubcategoryForView(null);
         }
@@ -812,78 +888,141 @@ const App: React.FC = () => {
   };
 
   const handleAddCategory = async (categoryName: string) => {
-    const newCategory: CategoryDefinition = { id: categoryName, name: categoryName, subcategories: ['Default'] };
-    setCategories(prev => [...prev, newCategory]);
-  };
-
-  const handleDeleteCategory = async (categoryId: string, categoryName: string) => {
-    if (categoryName === 'Uncategorized' || !categoryId) return; 
-    
-    // Reassign items
-    setItems(prevItems => prevItems.map(item => {
-      if (item.category === categoryName) {
-        return { ...item, category: 'Uncategorized', subcategory: 'Default' };
-      }
-      return item;
-    }));
-      
-    setCategories(prev => prev.filter(cat => cat.id !== categoryId));
-
-    if (selectedCategoryForView === categoryName) {
-        setSelectedCategoryForView(null);
-        setSelectedSubcategoryForView(null);
+    if (categories.find(c => c.name.toLowerCase() === categoryName.toLowerCase())) {
+        alert("Category already exists.");
+        return;
+    }
+    const newCategoryData = { name: categoryName, subcategories: ['Default'] };
+    try {
+        const newCategoryRef = push(dbRef(rtdb, 'categories'));
+        await set(newCategoryRef, newCategoryData);
+        alert(`Category "${categoryName}" added successfully to RTDB.`);
+    } catch (error: any) {
+        console.error("Error adding category to RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+        alert(`Failed to add category. ${error.message?.includes('PERMISSION_DENIED') ? 'Permission denied. Check RTDB rules (ensure public write access).' : 'Network issue or other error. Please try again.'}`);
     }
   };
 
+const handleDeleteCategory = async (categoryId: string, categoryName: string) => {
+    if (categoryName === 'Uncategorized' || !categoryId) return;
+
+    try {
+        const updates: { [key: string]: any } = {};
+        
+        const itemsToReassign = items.filter(item => item.category === categoryName);
+
+        let uncategorizedCat = categories.find(c => c.name === 'Uncategorized');
+        if (!uncategorizedCat) {
+            console.log("'Uncategorized' category not found in local state, scheduling creation in RTDB for item reassignment.");
+            const newUncatRefKey = push(child(dbRef(rtdb), 'categories')).key; 
+            if (!newUncatRefKey) throw new Error("Failed to generate key for Uncategorized category in RTDB.");
+            
+            updates[`/categories/${newUncatRefKey}`] = { name: 'Uncategorized', subcategories: ['Default'] };
+        } else if (!uncategorizedCat.subcategories.includes('Default')) {
+             updates[`/categories/${uncategorizedCat.id}/subcategories`] = [...new Set([...uncategorizedCat.subcategories, 'Default'])].sort();
+        }
+
+        itemsToReassign.forEach(item => {
+            updates[`/products/${item.id}/category`] = 'Uncategorized';
+            updates[`/products/${item.id}/subcategory`] = 'Default';
+        });
+        
+        updates[`/categories/${categoryId}`] = null; 
+
+        await update(dbRef(rtdb), updates);
+        alert(`Category "${categoryName}" deleted. Associated items (if any) moved to Uncategorized/Default.`);
+
+        if (selectedCategoryForView === categoryName) {
+            setSelectedCategoryForView(null);
+            setSelectedSubcategoryForView(null);
+        }
+    } catch (error: any) {
+        console.error("Error deleting category and reassigning items in RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+        alert(`Failed to delete category. ${error.message?.includes('PERMISSION_DENIED') ? 'Permission denied. Check RTDB rules (ensure public write access).' : 'Network issue or other error. Please try again.'}`);
+    }
+};
+
+
   const handleAddSubcategory = async (categoryId: string, categoryName: string, subcategoryName: string) => {
-    if (!categoryId) return;
-    setCategories(prevCats => prevCats.map(cat => {
-      if (cat.id === categoryId) {
-        const newSubcategories = [...new Set([...cat.subcategories, subcategoryName])].sort();
-        return { ...cat, subcategories: newSubcategories };
-      }
-      return cat;
-    }));
+    if (!categoryId || categoryName === 'Uncategorized') {
+        alert("Cannot add subcategories to 'Uncategorized' or an invalid category.");
+        return;
+    }
+    const category = categories.find(cat => cat.id === categoryId);
+    if (category) {
+        if (category.subcategories.find(s => s.toLowerCase() === subcategoryName.toLowerCase())) {
+            alert("Subcategory already exists in this category.");
+            return;
+        }
+        const newSubcategories = [...new Set([...category.subcategories, subcategoryName])].sort();
+        try {
+            await set(dbRef(rtdb, `categories/${categoryId}/subcategories`), newSubcategories);
+             alert(`Subcategory "${subcategoryName}" added to "${categoryName}" in RTDB.`);
+        } catch (error: any)
+        {
+            console.error("Error adding subcategory to RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+            alert(`Failed to add subcategory. ${error.message?.includes('PERMISSION_DENIED') ? 'Permission denied. Check RTDB rules (ensure public write access).' : 'Network issue or other error. Please try again.'}`);
+        }
+    } else {
+        alert("Parent category not found.");
+    }
   };
 
 const handleDeleteSubcategory = async (categoryId: string, categoryName: string, subcategoryName: string) => {
     if ((categoryName === 'Uncategorized' && subcategoryName === 'Default') || !categoryId) {
-        return;
+        return; 
     }
-    const parentCatDef = categories.find(c => c.id === categoryId);
-    if (parentCatDef && subcategoryName === 'Default' && parentCatDef.subcategories.length === 1 && categoryName !== 'Uncategorized') {
-        alert("Cannot delete the only 'Default' subcategory if it's not Uncategorized.");
+    const parentCategory = categories.find(c => c.id === categoryId);
+    if (!parentCategory) {
+        alert("Parent category not found.");
         return;
     }
 
-    const itemsWillBeReassigned = items.some(item => item.category === categoryName && item.subcategory === subcategoryName);
+    if (subcategoryName === 'Default' && parentCategory.subcategories.length === 1 && categoryName !== 'Uncategorized') {
+        alert("Cannot delete the only 'Default' subcategory of a non-'Uncategorized' category. Add another subcategory first, or delete the parent category.");
+        return;
+    }
+    
+    try {
+        const updates: { [key: string]: any } = {};
+        
+        let updatedSubcategories = parentCategory.subcategories.filter(sub => sub !== subcategoryName);
+        
+        const itemsToReassign = items.filter(item => item.category === categoryName && item.subcategory === subcategoryName);
+        
+        let targetSubcategory = 'Default'; 
 
-    setCategories(prevCats => prevCats.map(cat => {
-      if (cat.id === categoryId) {
-        let updatedSubcategories = cat.subcategories.filter(sub => sub !== subcategoryName);
-        if (itemsWillBeReassigned && subcategoryName !== 'Default' && !updatedSubcategories.includes('Default')) {
-          updatedSubcategories.push('Default');
-          updatedSubcategories.sort();
+        if (itemsToReassign.length > 0) {
+            if (subcategoryName !== 'Default' && !updatedSubcategories.includes('Default')) {
+                updatedSubcategories.push('Default');
+                updatedSubcategories.sort(); 
+            } else if (subcategoryName === 'Default' && updatedSubcategories.length === 0 && categoryName !== 'Uncategorized') {
+                updatedSubcategories.push('Default');
+            }
+            itemsToReassign.forEach(item => {
+                updates[`/products/${item.id}/subcategory`] = targetSubcategory;
+            });
         }
+        
         if (categoryName !== 'Uncategorized' && updatedSubcategories.length === 0) {
-          updatedSubcategories.push('Default');
+          updatedSubcategories.push('Default'); 
         }
-        return { ...cat, subcategories: updatedSubcategories };
-      }
-      return cat;
-    }));
 
-    if (itemsWillBeReassigned) {
-      setItems(prevItems => prevItems.map(item => {
-        if (item.category === categoryName && item.subcategory === subcategoryName) {
-          return { ...item, subcategory: 'Default' };
+        updates[`/categories/${categoryId}/subcategories`] = updatedSubcategories.length > 0 ? updatedSubcategories : null; 
+         if (categoryName === 'Uncategorized' && updatedSubcategories.length === 0 && subcategoryName === 'Default') {
+             updates[`/categories/${categoryId}/subcategories`] = ['Default'];
+         }
+
+
+        await update(dbRef(rtdb), updates);
+        alert(`Subcategory "${subcategoryName}" deleted from "${categoryName}". Associated items (if any) moved to "Default" subcategory in RTDB.`);
+
+        if (selectedCategoryForView === categoryName && selectedSubcategoryForView === subcategoryName) {
+            setSelectedSubcategoryForView(null); 
         }
-        return item;
-      }));
-    }
-
-    if (selectedCategoryForView === categoryName && selectedSubcategoryForView === subcategoryName) {
-        setSelectedSubcategoryForView(null); 
+    } catch (error: any) {
+        console.error("Error deleting subcategory in RTDB. Code:", error?.code, "Message:", error?.message, "Full error:", error);
+        alert(`Failed to delete subcategory. ${error.message?.includes('PERMISSION_DENIED') ? 'Permission denied. Check RTDB rules (ensure public write access).' : 'Network issue or other error. Please try again.'}`);
     }
   };
 
@@ -898,10 +1037,15 @@ const handleDeleteSubcategory = async (categoryId: string, categoryName: string,
   };
 
   const handleNavigateBackFromStockView = () => {
+    if (historyIndexRef.current > 0) {
+      window.history.back();
+      return;
+    }
+
     if (selectedSubcategoryForView) {
-      setSelectedSubcategoryForView(null); 
+      setSelectedSubcategoryForView(null);
     } else if (selectedCategoryForView) {
-      setSelectedCategoryForView(null); 
+      setSelectedCategoryForView(null);
     }
   };
 
@@ -909,141 +1053,195 @@ const handleDeleteSubcategory = async (categoryId: string, categoryName: string,
     return items.filter(item => item.category === categoryName && item.subcategory === subcategoryName).length;
   }, [items]);
 
-  if (authLoading) {
-    return <div className="loading-container"><p>Loading application...</p></div>; 
+
+  if (!isAuthReady) {
+    return (
+        <div className="loading-container">
+            <p>Loading authentication status...</p>
+        </div>
+    );
   }
 
-  if (!currentUserEmail) { // Use currentUserEmail to check for logged-in user
-    if (authViewMode === 'register') {
-      return <RegistrationView 
-                onRegister={handleRegister} 
-                registrationMessage={registrationMessage} 
-                onSwitchToLogin={() => { setAuthViewMode('login'); setRegistrationMessage(null); }}
-                isRegistering={isProcessingAuth} 
-             />;
-    }
-    return <LoginView 
-              onLogin={handleLogin} 
-              loginError={loginError} 
-              onSwitchToRegister={() => { setAuthViewMode('register'); setLoginError(null); }}
-              isLoggingIn={isProcessingAuth} 
-           />;
+  if (!initialCategoriesLoaded || !initialItemsLoaded) {
+    let statusParts: string[] = [];
+    if (!initialCategoriesLoaded) statusParts.push("categories");
+    if (!initialItemsLoaded) statusParts.push("inventory data");
+    return (
+        <div className="loading-container">
+            <p>Loading {statusParts.join(" and ")} from Firebase Realtime Database...</p>
+            <p style={{marginTop: '10px', fontSize: '0.9em', color: '#555'}}>
+                (This may take a moment. If loading persists or you see errors, please ensure your Realtime Database is correctly set up,
+                security rules allow public access, and your internet connection is stable.)
+            </p>
+        </div>
+    ); 
   }
 
+  const adminToggleLabel = viewMode === 'admin'
+    ? 'View Product Stock'
+    : (currentUser ? 'View Admin Panel' : 'Admin Login');
+  const adminToggleAriaLabel = viewMode === 'admin'
+    ? 'Switch to Product Stock View'
+    : (currentUser ? 'Switch to Admin Panel View' : 'Open Admin Login');
+  
   return (
     <div className="container">
       <header className="app-header">
-        <h1>Inventory Management {currentUserRole === 'admin' && <span className="admin-badge">(Admin)</span>}</h1>
+        <h1>Armada Inventory Management</h1>
         <div className="header-controls">
-          {currentUserRole === 'admin' && viewMode === 'admin' && (
+          {viewMode === 'admin' && currentUser && (
             <input
               type="text"
-              placeholder="Search by name or SKU (in table)..."
+              placeholder="Search by name or SKU..."
               className="search-input"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               aria-label="Search inventory items"
             />
           )}
-          {currentUserRole === 'admin' && (
-            <button 
-              onClick={toggleViewMode} 
-              className="btn btn-info" 
-              aria-label={viewMode === 'admin' ? "Switch to Product Stock View" : "Switch to Admin Panel View"}
-            >
-              {viewMode === 'admin' ? 'View Product Stock' : 'View Admin Panel'}
-            </button>
-          )}
-          {currentUserRole === 'admin' && viewMode === 'admin' && (
+          <button 
+            onClick={toggleViewMode} 
+            className="btn btn-info" 
+            aria-label={adminToggleAriaLabel}
+          >
+            {adminToggleLabel}
+          </button>
+          {viewMode === 'admin' && currentUser && (
             <button onClick={() => openModal()} className="btn btn-primary" aria-label="Add new item">
               Add New Item
             </button>
           )}
-           <button onClick={handleLogout} className="btn btn-danger" aria-label="Logout">
-            Logout ({currentUsername || currentUserEmail})
-          </button>
+          {currentUser && (
+            <button onClick={handleLogout} className="btn btn-secondary" aria-label="Logout from admin">
+              Logout
+            </button>
+          )}
         </div>
       </header>
 
-      {currentUserRole === 'admin' && viewMode === 'admin' && isModalOpen && (
+      {viewMode === 'admin' && currentUser && isModalOpen && (
         <ItemModal
           item={editingItem}
           onClose={closeModal}
           onSave={handleSaveItem}
           categories={categories}
+          editingItemId={editingItem?.id || null}
         />
       )}
       
-      {currentUserRole === 'admin' && viewMode === 'admin' ? (
-        <>
-          <AdminCategoryManager
-            categories={categories}
-            onAddCategory={handleAddCategory}
-            onDeleteCategory={handleDeleteCategory}
-            onAddSubcategory={handleAddSubcategory}
-            onDeleteSubcategory={handleDeleteSubcategory}
-            items={items}
-          />
-          <main className="inventory-table-container">
-            {filteredItemsForAdminTable.length === 0 && !searchTerm && (
-               <div className="empty-state">
-                 <h2>No items in inventory.</h2>
-                 <p>Click "Add New Item" to get started.</p>
-               </div>
-            )}
-            {filteredItemsForAdminTable.length === 0 && searchTerm && (
-                <div className="empty-state">
-                  <h2>No items match your search "{searchTerm}".</h2>
-                  <p>Try a different search term or clear the search.</p>
-                </div>
-            )}
-            {filteredItemsForAdminTable.length > 0 && (
-              <table className="inventory-table" aria-label="Inventory Items">
-                <thead>
-                  <tr>
-                    <th>Image</th>
-                    <th>Name</th>
-                    <th>SKU</th>
-                    <th>Category</th>
-                    <th>Subcategory</th>
-                    <th>Total Quantity</th>
-                    <th>Price</th>
-                    <th>Description</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredItemsForAdminTable.map(item => {
-                    const totalQuantity = calculateTotalQuantity(item.sizes);
-                    return (
-                      <tr key={item.id}>
-                        <td data-label="Image" className="cell-image">
-                          {item.imageUrl ? ( // imageUrl is Base64
-                            <img src={item.imageUrl} alt={item.name} className="table-item-image" />
-                          ) : (
-                            <span className="no-image-text">No Image</span>
-                          )}
-                        </td>
-                        <td data-label="Name">{item.name}</td>
-                        <td data-label="SKU">{item.sku}</td>
-                        <td data-label="Category">{item.category}</td>
-                        <td data-label="Subcategory">{item.subcategory}</td>
-                        <td data-label="Total Quantity">{totalQuantity}</td>
-                        <td data-label="Price">${item.price.toFixed(2)}</td>
-                        <td data-label="Description">{item.description || '-'}</td>
-                        <td data-label="Actions" className="actions-cell">
-                          <button onClick={() => openModal(item)} className="btn btn-secondary btn-sm" aria-label={`Edit ${item.name}`}>Edit</button>
-                          <button onClick={() => handleDeleteItem(item.id!)} className="btn btn-danger btn-sm" aria-label={`Delete ${item.name}`}>Delete</button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            )}
-          </main>
-        </>
-      ) : ( 
+      {viewMode === 'admin' ? (
+        currentUser ? (
+          <>
+            <AdminCategoryManager
+              categories={categories}
+              onAddCategory={handleAddCategory}
+              onDeleteCategory={handleDeleteCategory}
+              onAddSubcategory={handleAddSubcategory}
+              onDeleteSubcategory={handleDeleteSubcategory}
+              items={items}
+            />
+            <main className="inventory-table-container">
+              {!initialItemsLoaded && <div className="loading-container"><p>Loading items...</p></div>}
+              {initialItemsLoaded && filteredItemsForAdminTable.length === 0 && !searchTerm && (
+                 <div className="empty-state">
+                   <h2>No items in inventory.</h2>
+                   <p>Click "Add New Item" to get started.</p>
+                 </div>
+              )}
+               {initialItemsLoaded && filteredItemsForAdminTable.length === 0 && searchTerm && (
+                  <div className="empty-state">
+                    <h2>No items match your search "{searchTerm}".</h2>
+                    <p>Try a different search term or clear the search.</p>
+                  </div>
+              )}
+              {initialItemsLoaded && filteredItemsForAdminTable.length > 0 && (
+                <table className="inventory-table" aria-label="Inventory Items">
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>SKU</th>
+                      <th>Category</th>
+                      <th>Subcategory</th>
+                      <th>Total Quantity</th>
+                      <th>Price</th>
+                      <th>Description</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredItemsForAdminTable.map(item => {
+                      const totalQuantity = calculateTotalQuantity(item.sizes);
+                      return (
+                        <tr key={item.id}>
+                          <td data-label="Name">{item.name}</td>
+                          <td data-label="SKU">{item.sku}</td>
+                          <td data-label="Category">{item.category}</td>
+                          <td data-label="Subcategory">{item.subcategory}</td>
+                          <td data-label="Total Quantity">{totalQuantity}</td>
+                          <td data-label="Price">৳{item.price.toFixed(2)}</td>
+                          <td data-label="Description">{item.description || '-'}</td>
+                          <td data-label="Actions" className="actions-cell">
+                            <button onClick={() => openModal(item)} className="btn btn-secondary btn-sm" aria-label={`Edit ${item.name}`}>Edit</button>
+                            <button onClick={() => handleDeleteItem(item.id)} className="btn btn-danger btn-sm" aria-label={`Delete ${item.name}`}>Delete</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </main>
+          </>
+        ) : (
+          <div className="login-container">
+            <form className="login-form" onSubmit={handleAdminLogin} autoComplete="off">
+              <h2>Admin Login</h2>
+              {loginError && <div className="login-error-message">{loginError}</div>}
+              <div className="form-group">
+                <label htmlFor="loginEmail">Email</label>
+                <input
+                  type="email"
+                  id="loginEmail"
+                  name="loginEmail"
+                  value={loginEmail}
+                  onChange={(e) => {
+                    setLoginEmail(e.target.value);
+                    if (loginError) setLoginError(null);
+                  }}
+                  autoComplete="off"
+                  required
+                  disabled={isLoggingIn}
+                />
+              </div>
+              <div className="form-group">
+                <label htmlFor="loginPassword">Password</label>
+                <input
+                  type="password"
+                  id="loginPassword"
+                  name="loginPassword"
+                  value={loginPassword}
+                  onChange={(e) => {
+                    setLoginPassword(e.target.value);
+                    if (loginError) setLoginError(null);
+                  }}
+                  autoComplete="new-password"
+                  required
+                  disabled={isLoggingIn}
+                />
+              </div>
+              <button type="submit" className="btn btn-primary btn-login" disabled={isLoggingIn}>
+                {isLoggingIn ? 'Logging in...' : 'Login'}
+              </button>
+              <p className="auth-switch-message">
+                Back to product stock?{' '}
+                <button type="button" className="btn-link" onClick={() => setViewMode('stock')}>
+                  View stock
+                </button>
+              </p>
+            </form>
+          </div>
+        )
+      ) : (
         <ProductStockView
           items={itemsForProductStockView}
           allCategories={categories}
@@ -1053,12 +1251,12 @@ const handleDeleteSubcategory = async (categoryId: string, categoryName: string,
           onSelectSubcategory={handleSelectSubcategoryForView}
           onNavigateBack={handleNavigateBackFromStockView}
           onSellItemSize={handleSellItemSize}
-          userRole={currentUserRole}
           getCategoryItemCount={getCategoryItemCount}
+          isAdmin={!!currentUser}
         />
       )}
       <footer className="app-footer">
-        <p>&copy; {new Date().getFullYear()} Inventory App. All rights reserved.</p>
+        <p>&copy; {new Date().getFullYear()} Inventory App. All rights reserved by Armada.</p>
       </footer>
     </div>
   );
@@ -1072,112 +1270,127 @@ interface ItemModalFormData {
   sizes: Record<Size, number>;
   price: number;
   description?: string;
-  imageUrl?: string; // Base64 string
+  imageUrl?: string;
 }
 
 interface ItemModalProps {
   item: InventoryItem | null;
   onClose: () => void;
-  onSave: (item: InventoryItem) => Promise<void>;
+  onSave: (item: InventoryItem) => Promise<void>; 
   categories: CategoryDefinition[];
+  editingItemId: string | null; 
 }
 
-const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories }) => {
+const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories, editingItemId }) => {
   
   const getInitialFormData = useCallback((): ItemModalFormData => {
     const defaultSizes = SIZES.reduce((acc, size) => { acc[size] = 0; return acc; }, {} as Record<Size, number>);
     
-    let initialCategory = categories.find(c => c.name === 'Uncategorized')?.name || (categories.length > 0 ? categories[0].name : '');
-    let initialSubcategory = categories.find(c => c.name === initialCategory)?.subcategories.includes('Default') 
-        ? 'Default' 
-        : (categories.find(c => c.name === initialCategory)?.subcategories[0] || '');
+    let initialCategoryName = '';
+    let initialSubcategoryName = '';
 
-    if (item) {
-       const currentItemSizes = SIZES.reduce((acc, size) => {
-        acc[size] = Number(item.sizes?.[size]) || 0;
-        return acc;
-      }, {} as Record<Size, number>);
+    const uncategorizedCategory = categories.find(c => c.name === 'Uncategorized');
+    const firstAvailableCategory = categories.find(c => c.name !== 'Uncategorized') || categories[0];
 
-      const itemCategoryInState = categories.find(c => c.name === item.category);
-      if (itemCategoryInState) {
-        initialCategory = itemCategoryInState.name;
-        const itemSubcategoryInState = itemCategoryInState.subcategories.includes(item.subcategory) 
-            ? item.subcategory 
-            : (itemCategoryInState.subcategories.includes('Default') ? 'Default' : itemCategoryInState.subcategories[0]);
-        initialSubcategory = itemSubcategoryInState || 'Default'; 
+    if (item) { 
+      const currentItemCategory = categories.find(c => c.name === item.category);
+      if (currentItemCategory) {
+        initialCategoryName = currentItemCategory.name;
+        initialSubcategoryName = currentItemCategory.subcategories.includes(item.subcategory)
+          ? item.subcategory
+          : (currentItemCategory.subcategories.includes('Default') ? 'Default' : (currentItemCategory.subcategories[0] || ''));
+      } else { 
+        if (uncategorizedCategory) {
+          initialCategoryName = uncategorizedCategory.name;
+          initialSubcategoryName = uncategorizedCategory.subcategories.includes('Default') ? 'Default' : (uncategorizedCategory.subcategories[0] || 'Default');
+        } else if (firstAvailableCategory) {
+          initialCategoryName = firstAvailableCategory.name;
+          initialSubcategoryName = firstAvailableCategory.subcategories.includes('Default') ? 'Default' : (firstAvailableCategory.subcategories[0] || '');
+        }
       }
-      
       return {
         name: item.name,
         sku: item.sku,
-        category: initialCategory,
-        subcategory: initialSubcategory,
-        sizes: currentItemSizes,
+        category: initialCategoryName,
+        subcategory: initialSubcategoryName,
+        sizes: SIZES.reduce((acc, size) => { acc[size] = Number(item.sizes?.[size]) || 0; return acc; }, {} as Record<Size, number>),
         price: item.price,
         description: item.description || '',
-        imageUrl: item.imageUrl || '', // Base64 string
+        imageUrl: item.imageUrl || '',
+      };
+    } else { // Adding new item
+      if (categories.length > 0) {
+        const preferredInitialCategory = categories.find(c => c.name !== 'Uncategorized') || uncategorizedCategory || categories[0];
+        if (preferredInitialCategory) {
+            initialCategoryName = preferredInitialCategory.name;
+            initialSubcategoryName = preferredInitialCategory.subcategories.includes('Default') 
+                ? 'Default' 
+                : (preferredInitialCategory.subcategories[0] || '');
+        }
+      }
+      return {
+        name: '',
+        sku: '',
+        category: initialCategoryName,
+        subcategory: initialSubcategoryName,
+        sizes: defaultSizes,
+        price: 0,
+        description: '',
+        imageUrl: '',
       };
     }
-    
-    const uncategorizedCat = categories.find(c => c.name === 'Uncategorized');
-    if (uncategorizedCat) {
-        initialCategory = 'Uncategorized';
-        initialSubcategory = uncategorizedCat.subcategories.includes('Default') ? 'Default' : (uncategorizedCat.subcategories[0] || '');
-    } else if (categories.length > 0) { 
-        initialCategory = categories[0].name;
-        initialSubcategory = categories[0].subcategories[0] || '';
-    }
-
-    return {
-      name: '',
-      sku: '',
-      category: initialCategory,
-      subcategory: initialSubcategory,
-      sizes: defaultSizes,
-      price: 0,
-      description: '',
-      imageUrl: '', // Base64 string
-    };
   }, [item, categories]);
   
   const [formData, setFormData] = useState<ItemModalFormData>(getInitialFormData());
   const [errors, setErrors] = useState<Record<string, string>>({});
-  const [isProcessing, setIsProcessing] = useState(false); // General processing state
-  
+  const [isProcessing, setIsProcessing] = useState(false);
+
   const availableSubcategories = categories.find(c => c.name === formData.category)?.subcategories || [];
 
   useEffect(() => {
     setFormData(getInitialFormData());
     setErrors({});
-  }, [item, getInitialFormData]);
+  }, [item, getInitialFormData]); 
 
   useEffect(() => {
     const currentCategoryDef = categories.find(c => c.name === formData.category);
-    if (currentCategoryDef && !currentCategoryDef.subcategories.includes(formData.subcategory)) {
-      setFormData(prev => ({
-        ...prev,
-        subcategory: currentCategoryDef.subcategories.includes('Default') ? 'Default' : (currentCategoryDef.subcategories[0] || '')
-      }));
-    } else if (!currentCategoryDef && formData.category) { 
-        const uncategorizedOpt = categories.find(c => c.name === 'Uncategorized');
-        if (uncategorizedOpt) {
+
+    if (formData.category && currentCategoryDef) { 
+        if (!currentCategoryDef.subcategories.includes(formData.subcategory)) { 
             setFormData(prev => ({
                 ...prev,
-                category: 'Uncategorized',
-                subcategory: uncategorizedOpt.subcategories.includes('Default') ? 'Default' : (uncategorizedOpt.subcategories[0] || '')
+                subcategory: currentCategoryDef.subcategories.includes('Default') 
+                             ? 'Default' 
+                             : (currentCategoryDef.subcategories[0] || '') 
             }));
-        } else if (categories.length > 0) {
+        }
+    } else if (formData.category && !currentCategoryDef && categories.length > 0) { 
+        const defaultCat = categories.find(c => c.name === 'Uncategorized') || categories[0];
+        if (defaultCat) { 
             setFormData(prev => ({
                 ...prev,
-                category: categories[0].name,
-                subcategory: categories[0].subcategories[0] || ''
+                category: defaultCat.name,
+                subcategory: defaultCat.subcategories.includes('Default') ? 'Default' : (defaultCat.subcategories[0] || '')
             }));
         } else { 
-             setFormData(prev => ({ ...prev, category: '', subcategory: ''}));
+             setFormData(prev => ({ ...prev, category: '', subcategory: '' }));
+        }
+    } else if (categories.length === 0) { 
+        setFormData(prev => ({ ...prev, category: '', subcategory: '' }));
+    } else if (!formData.category && categories.length > 0) { 
+        const preferredInitialCategory = categories.find(c => c.name !== 'Uncategorized') || categories.find(c => c.name === 'Uncategorized') || categories[0];
+        if (preferredInitialCategory) {
+            setFormData(prev => ({
+                ...prev,
+                category: preferredInitialCategory.name,
+                subcategory: preferredInitialCategory.subcategories.includes('Default') 
+                             ? 'Default' 
+                             : (preferredInitialCategory.subcategories[0] || '')
+            }));
         }
     }
-  }, [formData.category, categories, formData.subcategory]);
-
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [formData.category, categories]);
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
     const { name, value, type } = e.target;
@@ -1209,48 +1422,21 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
     setErrors(newErrors);
   };
   
-  const handleImageFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (file) {
-      if (file.size > 5 * 1024 * 1024) { // 5MB limit
-        setErrors(prev => ({ ...prev, imageUrl: "Image size should not exceed 5MB."}));
-        event.target.value = ''; 
-        return;
-      }
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setFormData(prev => ({ ...prev, imageUrl: reader.result as string })); // Store Base64 string
-         setErrors(prev => ({ ...prev, imageUrl: undefined }));
-      };
-      reader.onerror = () => {
-        console.error("Error reading file");
-        setErrors(prev => ({ ...prev, imageUrl: "Failed to read image file."}));
-      }
-      reader.readAsDataURL(file);
-    }
-  };
-
-  const handleRemoveImage = async () => {
-    setFormData(prev => ({ ...prev, imageUrl: '' })); // Clear Base64 string
-    const fileInput = document.getElementById('imageUrlFile') as HTMLInputElement | null;
-    if (fileInput) fileInput.value = ''; 
-    setErrors(prev => ({ ...prev, imageUrl: undefined }));
-  };
-
-
   const validate = () => {
     const newErrors: Record<string, string> = {};
     if (!formData.name.trim()) newErrors.name = 'Name is required.';
     if (!formData.sku.trim()) newErrors.sku = 'SKU is required.';
-    if (!formData.category) newErrors.category = 'Category is required.';
-    else {
+    
+    if (!formData.category) {
+        newErrors.category = 'Category is required. Please create one if none exist.';
+    } else {
         const catDef = categories.find(c => c.name === formData.category);
         if (!catDef) {
-            newErrors.category = 'Selected category does not exist.';
+            newErrors.category = 'Selected category is invalid or not loaded. Please re-select or manage categories.';
         } else if (!formData.subcategory) {
-            newErrors.subcategory = 'Subcategory is required.';
+            newErrors.subcategory = 'Subcategory is required. Select or add a subcategory to the chosen category.';
         } else if (!catDef.subcategories.includes(formData.subcategory)) {
-            newErrors.subcategory = 'Selected subcategory is not valid for the chosen category. Please re-select.';
+             newErrors.subcategory = `Subcategory '${formData.subcategory}' is not valid for category '${formData.category}'. Available: ${catDef.subcategories.join(', ') || 'None (add "Default" or another subcategory)'}. Please re-select or manage subcategories.`;
         }
     }
 
@@ -1262,11 +1448,15 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
       if (sizeQuantity < 0) newErrors[`size_${size}`] = `Qty for ${size} cannot be negative.`;
       else if (isNaN(sizeQuantity)) newErrors[`size_${size}`] = `Qty for ${size} must be a number.`;
     });
-    if (errors.imageUrl) newErrors.imageUrl = errors.imageUrl; 
 
     setErrors(newErrors);
-    return Object.keys(newErrors).filter(key => key !== 'imageUrl' || newErrors.imageUrl).length === 0;
+    return Object.keys(newErrors).length === 0;
   };
+  
+  const timeoutPromise = (ms: number, message: string = 'Operation timed out') => 
+    new Promise((_, reject) => 
+      setTimeout(() => reject(new Error(message)), ms)
+    );
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1274,15 +1464,27 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
     setIsProcessing(true);
 
     const itemDataForSave: InventoryItem = {
-      ...formData,
-      id: item?.id || generateId(), // Ensure ID is present
+      id: editingItemId || '', 
+      name: formData.name.trim(),
+      sku: formData.sku.trim(),
+      category: formData.category,
+      subcategory: formData.subcategory,
+      sizes: formData.sizes,
+      price: Number(formData.price),
+      description: formData.description?.trim() || '',
+      imageUrl: formData.imageUrl?.trim() || '',
     };
     
     try {
-        await onSave(itemDataForSave);
-        // onClose will be called by App component after successful save
-    } catch (error) {
-        console.error("Error during onSave callback in ItemModal:", error);
+        await Promise.race([
+            onSave(itemDataForSave),
+            timeoutPromise(30000, 'Saving item timed out. Realtime Database might be offline or experiencing issues. Ensure your RTDB is correctly set up and security rules allow writes.') 
+        ]);
+    } catch (error: any) {
+        console.error("Error during onSave call or timeout in ItemModal (RTDB). Message:", error.message, "Full error object:", error);
+        if (error.message && error.message.startsWith('Saving item timed out')) {
+            alert(error.message); 
+        }
     } finally {
         setIsProcessing(false);
     }
@@ -1294,6 +1496,7 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
     return () => window.removeEventListener('keydown', handleEsc);
   }, [onClose, isProcessing]);
 
+
   return (
     <div className="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <div className="modal-content">
@@ -1302,26 +1505,39 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
           <button onClick={onClose} className="btn-close" aria-label="Close modal" disabled={isProcessing}>&times;</button>
         </header>
         <form onSubmit={handleSubmit} noValidate>
+          {/* Name */}
           <div className="form-group">
             <label htmlFor="name">Name</label>
             <input type="text" id="name" name="name" value={formData.name} onChange={handleChange} required aria-invalid={!!errors.name} aria-describedby={errors.name ? "name-error" : undefined} disabled={isProcessing} />
             {errors.name && <p id="name-error" className="error-message">{errors.name}</p>}
           </div>
+          {/* SKU */}
           <div className="form-group">
             <label htmlFor="sku">SKU</label>
             <input type="text" id="sku" name="sku" value={formData.sku} onChange={handleChange} required aria-invalid={!!errors.sku} aria-describedby={errors.sku ? "sku-error" : undefined} disabled={isProcessing} />
             {errors.sku && <p id="sku-error" className="error-message">{errors.sku}</p>}
           </div>
 
+          {/* Category */}
           <div className="form-group">
             <label htmlFor="category">Category</label>
-            <select id="category" name="category" value={formData.category} onChange={handleChange} required aria-invalid={!!errors.category} aria-describedby={errors.category ? "category-error" : undefined} disabled={isProcessing}>
-              {categories.length === 0 && <option value="">No categories available</option>}
-              {categories.map(cat => <option key={cat.id || cat.name} value={cat.name}>{cat.name}</option>)}
+            <select 
+                id="category" 
+                name="category" 
+                value={formData.category} 
+                onChange={handleChange} 
+                required 
+                aria-invalid={!!errors.category} 
+                aria-describedby={errors.category ? "category-error" : undefined} 
+                disabled={isProcessing || categories.length === 0}
+            >
+              {categories.length === 0 && <option value="">No categories available. Please add one in Admin Panel.</option>}
+              {categories.map(cat => <option key={cat.id} value={cat.name}>{cat.name}</option>)}
             </select>
             {errors.category && <p id="category-error" className="error-message">{errors.category}</p>}
           </div>
 
+          {/* Subcategory */}
           <div className="form-group">
             <label htmlFor="subcategory">Subcategory</label>
             <select 
@@ -1330,29 +1546,18 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
                 value={formData.subcategory} 
                 onChange={handleChange} 
                 required 
-                disabled={isProcessing || availableSubcategories.length === 0 && !formData.category}
+                disabled={isProcessing || !formData.category || availableSubcategories.length === 0}
                 aria-invalid={!!errors.subcategory} 
                 aria-describedby={errors.subcategory ? "subcategory-error" : undefined}
             >
               {!formData.category && <option value="">Select a category first</option>}
-              {formData.category && availableSubcategories.length === 0 && <option value="">No subcategories. 'Default' may be used.</option>}
+              {formData.category && availableSubcategories.length === 0 && <option value="">No subcategories. Add one in Admin Panel or 'Default' will be used.</option>}
               {availableSubcategories.map(sub => <option key={sub} value={sub}>{sub}</option>)}
             </select>
             {errors.subcategory && <p id="subcategory-error" className="error-message">{errors.subcategory}</p>}
           </div>
           
-          <div className="form-group">
-            <label htmlFor="imageUrlFile">Product Image</label>
-            <input type="file" id="imageUrlFile" name="imageUrlFile" accept="image/png, image/jpeg, image/gif, image/webp" onChange={handleImageFileChange} aria-describedby={errors.imageUrl ? "imageUrl-error" : undefined} disabled={isProcessing}/>
-            {errors.imageUrl && <p id="imageUrl-error" className="error-message">{errors.imageUrl}</p>}
-            {formData.imageUrl && ( 
-              <div className="image-preview-container">
-                <img src={formData.imageUrl} alt="Preview" className="image-preview" />
-                <button type="button" onClick={handleRemoveImage} className="btn btn-danger btn-xs btn-remove-image" aria-label="Remove current image" disabled={isProcessing}>Remove Image</button>
-              </div>
-            )}
-          </div>
-
+          {/* Sizes */}
           <fieldset className="form-group">
             <legend>Quantities by Size</legend>
             <div className="sizes-grid">
@@ -1366,15 +1571,31 @@ const ItemModal: React.FC<ItemModalProps> = ({ item, onClose, onSave, categories
             </div>
           </fieldset>
 
+          {/* Price */}
           <div className="form-group">
             <label htmlFor="price">Price</label>
             <input type="number" id="price" name="price" value={formData.price} onChange={handleChange} min="0" step="0.01" required aria-invalid={!!errors.price} aria-describedby={errors.price ? "price-error" : undefined} disabled={isProcessing}/>
             {errors.price && <p id="price-error" className="error-message">{errors.price}</p>}
           </div>
+          {/* Image URL */}
+          <div className="form-group">
+            <label htmlFor="imageUrl">Image URL (Optional)</label>
+            <input
+              type="text"
+              id="imageUrl"
+              name="imageUrl"
+              value={formData.imageUrl || ''}
+              onChange={handleChange}
+              placeholder="https://example.com/image.jpg"
+              disabled={isProcessing}
+            />
+          </div>
+          {/* Description */}
           <div className="form-group">
             <label htmlFor="description">Description (Optional)</label>
             <textarea id="description" name="description" value={formData.description || ''} onChange={handleChange} rows={3} disabled={isProcessing}/>
           </div>
+          {/* Actions */}
           <div className="modal-actions">
             <button type="button" onClick={onClose} className="btn btn-secondary" disabled={isProcessing}>Cancel</button>
             <button type="submit" className="btn btn-primary" disabled={isProcessing}>
