@@ -1,5 +1,5 @@
 {
-  "name": "inventory-management-app",
+  "name": "inventory-management-app-(rtdb---no-auth)",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "firebase": "^11.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
